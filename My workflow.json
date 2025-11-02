@@ -1,0 +1,475 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "517061a9-2285-477a-89d1-9d164ee35f3a",
+      "name": "Telegram Trigger",
+      "webhookId": "819ebd30-b728-486e-9fb9-deb277bc3271",
+      "credentials": {
+        "telegramApi": {
+          "id": "DOYAH0PcyOnZtmHe",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------- INPUT ----------\nconst text = String($json?.message?.text || '').trim();\n\n// ---------- Utils ----------\nconst chatId = $json?.message?.chat?.id;\nconst parts  = text.split(/\\s+/);\nconst rawSym = (parts[0] || '').toUpperCase().replace(/[^A-Z0-9]/g, '');\nconst tfInput = (parts[1] || '').toLowerCase();\n\n// Предположение по символу: добавим USDT, если есть хотя бы тикер\nconst symbolGuess = rawSym ? `${rawSym}USDT` : '';\n\n// Единое формирование ошибок: всегда возвращаем chatId, symbol, tf\nconst err = (message) => {\n  return [{\n    json: {\n      error: message,\n      chatId,\n      symbol: symbolGuess,    // даже в ошибке передаём, если известно\n      tf: tfInput             // даже в ошибке передаём исходное, что ввёл пользователь\n    }\n  }];\n};\n\n// ---------- Базовые проверки ----------\nif (!rawSym || !tfInput) {\n  return err('Введите запрос в формате: <монета> <таймфрейм>, например: BTC 1H');\n}\nif (!/^[A-Z0-9]{2,12}$/.test(rawSym)) {\n  return err('Некорректный тикер. Используйте латинские буквы/цифры: например, BTC 1H');\n}\n\n// ---------- Таймфреймы ----------\nconst tfMap = {\n  '1m': '1min',\n  '3m': '3min',\n  '5m': '5min',\n  '15m': '15min',\n  '30m': '30min',\n  '1h': '1h',\n  '4h': '4h',\n  '6h': '6h',\n  '12h': '12h',\n  '1d': '1day',\n  '1w': '1week'\n};\n\n// Жёстко запрещаем «месяц»\nconst monthAliases = ['1mo', '1mth', '1month', '1мон', '1месяц', '1м', '1M']; // разные варианты\nif (monthAliases.includes(tfInput)) {\n  return err('Таймфрейм 1M (месяц) недоступен. Используйте 1day или 1week.');\n}\n\nif (!tfMap[tfInput]) {\n  return err('Неверный таймфрейм. Доступно: 1m, 3m, 5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d, 1w.');\n}\n\n// ---------- Успешный выход ----------\nreturn [{\n  json: {\n    chatId,\n    symbol: `${rawSym}USDT`,\n    tf: tfInput,                  // что ввёл пользователь\n    granularity: tfMap[tfInput],  // что ждёт Bitget\n    limit: 300\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "a042b7a8-0201-4da8-90ca-06bb35f52d94",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "40d63d93-1dda-4858-891a-8457838db225",
+              "leftValue": "={{$json.error}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "f877dd4e-beef-41f6-bdb2-0350ea7e8304",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "url": "https://api.bitget.com/api/v2/spot/market/candles",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{$json.symbol}}"
+            },
+            {
+              "name": "granularity",
+              "value": "={{$json.granularity}}"
+            },
+            {
+              "name": "limit",
+              "value": "={{$json.limit}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        624,
+        -96
+      ],
+      "id": "38c01741-e991-4118-93fa-a87fb482ca8a",
+      "name": "Bitget Candles",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**************************************************\n * Aggregate & Indicators  (n8n Function)\n * Вход: ответ Bitget Candles ($json.data = [[ts,open,high,low,close,vol], ...])\n * Выход: { chatId, symbol, tf, granularity, limit, features, sample }\n **************************************************/\n\n// ---------- ВСПОМОГАТЕЛЬНЫЕ ----------\nfunction tryItem(nodeName) {\n  try {\n    const it = $items(nodeName, 0, 0);\n    return it && it.json ? it.json : {};\n  } catch (e) { return {}; }\n}\nfunction pick(...vals) {\n  for (const v of vals) if (v !== undefined && v !== null && v !== '') return v;\n  return undefined;\n}\nfunction normTf(tf) {\n  if (!tf) return undefined;\n  let t = String(tf).toLowerCase().trim();\n  t = t\n    .replace(/^1hour$/, '1h')\n    .replace(/^1week$/, '1w')\n    .replace(/^1min$/,  '1m')\n    .replace(/minute$/, 'm')\n    .replace(/min$/,    'm')\n    .replace(/hour$/,   'h')\n    .replace(/week$/,   'w');\n  return t;\n}\n\n// ---------- 0) ПОДТЯГИВАЕМ ПАРАМЕТРЫ ----------\nconst fromIf   = tryItem('If');\nconst fromCode = tryItem('Code');\nconst fromTrig = tryItem('Telegram Trigger');\n\n// То, что мог вернуться от пред. шагов / текущего JSON\nlet symbol      = pick($json.symbol, fromIf.symbol, fromCode.symbol);\nlet tf          = pick($json.tf, $json.granularity, fromIf.tf, fromIf.granularity, fromCode.tf, fromCode.granularity);\nlet granularity = pick($json.granularity, fromIf.granularity, fromCode.granularity, tf);\nlet limit       = pick($json.limit, fromIf.limit, fromCode.limit);\nlet chatId      = pick($json.chatId, fromIf.chatId, fromCode.chatId, fromTrig?.message?.chat?.id);\n\ntf = normTf(tf);\ngranularity = normTf(granularity);\n\n// ---------- 1) СВЕЧИ BITGET ----------\nconst raw = $json?.data || [];\nif (!Array.isArray(raw) || raw.length === 0) {\n  return [{\n    json: {\n      error: 'Нет данных по свече (пустой ответ источника).',\n      chatId, symbol: symbol || 'UNKNOWN', tf: tf || 'unknown'\n    }\n  }];\n}\n\n// нормализуем в числа\nconst kLines = raw\n  .map(k => [\n    Number(k[0]), // ts\n    Number(k[1]), // open\n    Number(k[2]), // high\n    Number(k[3]), // low\n    Number(k[4]), // close\n    Number(k[5] ?? 0) // volume\n  ])\n  .filter(k => Number.isFinite(k[0]) && Number.isFinite(k[4]));\n\nconst times   = kLines.map(k => k[0]);\nconst opens   = kLines.map(k => k[1]);\nconst highs   = kLines.map(k => k[2]);\nconst lows    = kLines.map(k => k[3]);\nconst closes  = kLines.map(k => k[4]);\nconst volumes = kLines.map(k => k[5]);\n\n// ---------- 2) ПРОВЕРКА МИНИМУМА ИСТОРИИ ----------\nconst MIN_BARS = 220; // запас для EMA200/ADX\nif (kLines.length < MIN_BARS) {\n  return [{\n    json: {\n      error: 'Недостаточно исторических данных для анализа. Выберите меньший таймфрейм или другую монету.',\n      chatId, symbol: symbol || 'UNKNOWN', tf: tf || 'unknown'\n    }\n  }];\n}\n\n// ---------- 3) ХЕЛПЕРЫ И ИНДИКАТОРЫ ----------\nconst SMA = (arr, p) => {\n  if (arr.length < p) return null;\n  const s = arr.slice(-p).reduce((a,b)=>a+b,0);\n  return s / p;\n};\n\nconst EMA_full = (arr, p) => {\n  if (arr.length < p) return null;\n  const k = 2 / (p + 1);\n  let ema = SMA(arr.slice(0, p), p);\n  for (let i = p; i < arr.length; i++) {\n    ema = arr[i] * k + ema * (1 - k);\n  }\n  return ema;\n};\n\n// ряд EMA (для MACD)\nconst EMA_series = (arr, p) => {\n  if (arr.length < p) return [];\n  const k = 2 / (p + 1);\n  let ema = SMA(arr.slice(0, p), p);\n  const out = [];\n  for (let i = p; i < arr.length; i++) {\n    ema = arr[i] * k + ema * (1 - k);\n    out.push(ema);\n  }\n  return out;\n};\n\nconst STD = (arr) => {\n  if (!arr || arr.length === 0) return null;\n  const m = arr.reduce((a,b)=>a+b,0) / arr.length;\n  const v = arr.reduce((a,b)=>a + (b - m) * (b - m), 0) / arr.length;\n  return Math.sqrt(v);\n};\n\n// EMA50 / EMA200\nconst ema50  = EMA_full(closes, 50);\nconst ema200 = EMA_full(closes, 200);\n\n// RSI14\nconst RSI = (arr, p = 14) => {\n  if (arr.length < p + 1) return null;\n  let gains = 0, losses = 0;\n  for (let i = arr.length - p; i < arr.length; i++) {\n    const ch = arr[i] - arr[i - 1];\n    if (ch > 0) gains += ch; else losses -= ch;\n  }\n  const avgG = gains / p;\n  const avgL = losses / p;\n  if (avgL === 0) return 100;\n  const rs = avgG / avgL;\n  return 100 - (100 / (1 + rs));\n};\nconst rsi14 = RSI(closes, 14);\n\n// ATR14\nconst ATR = (h, l, c, p = 14) => {\n  if (h.length < p + 1 || l.length < p + 1 || c.length < p + 1) return null;\n  const TR = [];\n  for (let i = 1; i < h.length; i++) {\n    const tr = Math.max(\n      h[i] - l[i],\n      Math.abs(h[i] - c[i - 1]),\n      Math.abs(l[i] - c[i - 1])\n    );\n    TR.push(tr);\n  }\n  return EMA_full(TR, p); // Wilder EMA\n};\nconst atr14 = ATR(highs, lows, closes, 14);\n\n// ADX14 (приближенно для последнего значения)\nconst ADX = (h, l, c, p = 14) => {\n  if (h.length < p + 1) return null;\n  const dmPlus = [], dmMinus = [], TR = [];\n  for (let i = 1; i < h.length; i++) {\n    const up = h[i] - h[i - 1];\n    const dn = l[i - 1] - l[i];\n    dmPlus.push(up > dn && up > 0 ? up : 0);\n    dmMinus.push(dn > up && dn > 0 ? dn : 0);\n    TR.push(Math.max(\n      h[i] - l[i],\n      Math.abs(h[i] - c[i - 1]),\n      Math.abs(l[i] - c[i - 1])\n    ));\n  }\n  const tr14 = EMA_full(TR, p);\n  const dmp14 = EMA_full(dmPlus, p);\n  const dmn14 = EMA_full(dmMinus, p);\n  if ([tr14, dmp14, dmn14].some(v => v === null)) return null;\n\n  const plusDI  = 100 * (dmp14 / tr14);\n  const minusDI = 100 * (dmn14 / tr14);\n  const dx = 100 * (Math.abs(plusDI - minusDI) / Math.max(plusDI + minusDI, 1e-9));\n  return dx;\n};\nconst adx14 = ADX(highs, lows, closes, 14);\n\n// Bollinger Bands (20, 2) — относительная ширина\nconst BB_width = (arr, p = 20, mult = 2) => {\n  if (arr.length < p) return null;\n  const last = arr.slice(-p);\n  const m = last.reduce((a,b)=>a+b,0)/p;\n  const sd = STD(last);\n  const upper = m + mult * sd;\n  const lower = m - mult * sd;\n  if (!Number.isFinite(upper) || !Number.isFinite(lower)) return null;\n  return (upper - lower) / m;\n};\nconst bb_width = BB_width(closes, 20, 2);\n\n// Наклон EMA200 (дельта за 5 баров)\nlet ema200_slope = null;\nif (closes.length >= 200 + 5) {\n  const emaSeries200 = EMA_series(closes, 200);\n  if (emaSeries200.length >= 6) {\n    const last = emaSeries200.at(-1);\n    const prev = emaSeries200.at(-6);\n    ema200_slope = (last - prev) / 5;\n  }\n}\n\n// Режим: trend/range\nlet regime = 'range';\nif (adx14 !== null && adx14 > 20 && bb_width !== null && bb_width > 0.01) regime = 'trend';\n\n// MACD 12/26/9\nconst fast = 12, slow = 26, signalP = 9;\nconst emaFast = EMA_full(closes, fast);\nconst emaSlow = EMA_full(closes, slow);\nlet macd = null, macd_signal = null, macd_hist = null;\nif (emaFast !== null && emaSlow !== null) {\n  macd = emaFast - emaSlow;\n  const emaFser = EMA_series(closes, fast);\n  const emaSser = EMA_series(closes, slow);\n  const mLen = Math.min(emaFser.length, emaSser.length);\n  const macdSeries = [];\n  for (let i = 0; i < mLen; i++) macdSeries.push(emaFser[i] - emaSser[i]);\n  macd_signal = EMA_full(macdSeries, signalP);\n  if (macd_signal !== null) macd_hist = macd - macd_signal;\n}\n\n// Stochastic 14,3,3\nfunction stochasticK(highs, lows, closes, period = 14, smoothK = 3, smoothD = 3) {\n  if (closes.length < period + smoothK + smoothD) return { k: null, d: null };\n  const rawK = [];\n  for (let i = period - 1; i < closes.length; i++) {\n    const hi = Math.max(...highs.slice(i - period + 1, i + 1));\n    const lo = Math.min(...lows.slice(i - period + 1, i + 1));\n    const k = (hi === lo) ? 50 : ((closes[i] - lo) / (hi - lo)) * 100;\n    rawK.push(k);\n  }\n  const smK = [];\n  for (let i = 3 - 1; i < rawK.length; i++) {\n    smK.push(SMA(rawK.slice(i - 3 + 1, i + 1), 3));\n  }\n  const lastK = smK.at(-1);\n  const dArr = [];\n  for (let i = 3 - 1; i < smK.length; i++) {\n    dArr.push(SMA(smK.slice(i - 3 + 1, i + 1), 3));\n  }\n  const lastD = dArr.at(-1);\n  return { k: lastK ?? null, d: lastD ?? null };\n}\nconst { k: stoch_k, d: stoch_d } = stochasticK(highs, lows, closes, 14, 3, 3);\n\n// OBV + средний объём 20\nlet obv = null;\nif (closes.length > 1 && volumes.length === closes.length) {\n  let acc = 0;\n  for (let i = 1; i < closes.length; i++) {\n    if (closes[i] > closes[i-1]) acc += volumes[i];\n    else if (closes[i] < closes[i-1]) acc -= volumes[i];\n  }\n  obv = acc;\n}\nconst vol_avg20 = SMA(volumes, 20);\n\n// ---------- 4) ФИЧИ + СЭМПЛ ----------\nconst last_close = closes.at(-1);\nconst features = {\n  last_close,\n  ema50,\n  ema200,\n  rsi14,\n  atr14,\n  adx14,\n  bb_width,\n  ema200_slope,\n  regime,\n  macd,\n  macd_signal,\n  macd_hist,\n  stoch_k,\n  stoch_d,\n  obv,\n  vol_avg20\n};\n\n// последние 100 свечей (t, o, h, l, c)\nconst sample = kLines.slice(-100).map(k => [k[0], k[1], k[2], k[3], k[4]]);\n\n// ---------- 5) ВОЗВРАТ ----------\nreturn [{\n  json: {\n    chatId,\n    symbol: symbol || 'UNKNOWN',\n    tf: tf || 'unknown',\n    granularity: granularity || tf || 'unknown',\n    limit,\n    features,\n    sample\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -208
+      ],
+      "id": "06239898-8b43-4b33-b202-4388d8bd855f",
+      "name": "Aggregate & Indicators"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "64af54a9-2904-4501-baa3-7d0469bf25a5",
+              "leftValue": "={{$json.error}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1104,
+        -208
+      ],
+      "id": "9765c0d4-c5b7-436b-b1d7-0aa64292d353",
+      "name": "if2"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "=ℹ️ <b>Введите запрос в формате:</b>  \n<code>монета таймфрейм</code>\n\n<b>Примеры:</b>  \n• BTC 1h  \n• ETH 4h  \n• SOL 15m  \n• LINEA 1w\n",
+        "additionalFields": {
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        624,
+        96
+      ],
+      "id": "6d1bd1e9-91d0-4537-a53f-85a16e4c4a51",
+      "name": "не верный запрос",
+      "webhookId": "b4108525-b1c6-4217-85d2-a8b91bd335ad",
+      "credentials": {
+        "telegramApi": {
+          "id": "DOYAH0PcyOnZtmHe",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=⚠️ <b>Выбранная монета не поддерживается для анализа</b>\n\n<b>Монета:</b> {{ $json.symbol }}\n\n<b>Что сделать:</b>\n• Попробуйте выбрать другую монету\n",
+        "additionalFields": {
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        -32
+      ],
+      "id": "ea60eaf7-625d-4f5b-8465-afb05df5a58c",
+      "name": "если монеты нет",
+      "webhookId": "0e418eea-8a0a-4163-aada-6c5227e2350c",
+      "credentials": {
+        "telegramApi": {
+          "id": "DOYAH0PcyOnZtmHe",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=⚠️ <b>Недостаточно исторических данных для анализа</b>\n\n<b>Монета:</b> <code>{{$json.symbol}}</code>\n<b>Таймфрейм:</b> <code>{{$json.tf}}</code>\n\n<b>Что сделать:</b>\n• Выберите меньший таймфрейм (например, 15m или 1h)\n• Или попробуйте другую монету с большей историей торгов",
+        "additionalFields": {
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1344,
+        -32
+      ],
+      "id": "f8591c05-90f1-47c4-9c25-4be78634ca75",
+      "name": "нет истории на монете",
+      "webhookId": "c9515cb2-2a28-455c-8725-1099b6fdf715",
+      "credentials": {
+        "telegramApi": {
+          "id": "DOYAH0PcyOnZtmHe",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**********************************************\n * Build LLM Prompt  (n8n Function)\n * Вход (из Aggregate & Indicators):\n *   { chatId, symbol, tf, granularity, limit, features, sample }\n * Выход:\n *   { prompt: [ {role, content}, ... ], symbol, tf, granularity }\n **********************************************/\n\n// 1) Входные данные\nconst {\n  features = {},\n  sample = [],\n  symbol = null,\n  tf: _tf = null,\n  granularity: _gran = null,\n} = $json;\n\n// гарантируем, что tf не пустой (используем granularity как дубль)\nconst tf = _tf || _gran || null;\nconst granularity = _gran || _tf || null;\n\n// 2) Утилиты форматирования\nconst round = (v, p = 6) => {\n  if (v === null || v === undefined || Number.isNaN(Number(v))) return null;\n  const f = Math.pow(10, p);\n  return Math.round(Number(v) * f) / f;\n};\n\nconst cloneRounded = (obj) => {\n  const out = {};\n  for (const k of Object.keys(obj || {})) {\n    const v = obj[k];\n    out[k] = (typeof v === 'number') ? round(v, 6) : v;\n  }\n  return out;\n};\n\n// 3) Подготовим компактные данные\nconst f = cloneRounded(features);\n\n// уменьшим размер sample (хватает послед. 60 свечей)\nconst sampleCompact = (Array.isArray(sample) ? sample : []).slice(-60);\n\n// 4) Системная подсказка (что и как возвращать)\nconst systemMessage = `\nТы — краткосрочный технический аналитик крипторынка.\nТвоя задача — принять решение о торговом сигнале СЕЙЧАС, только на основе переданных ценовых данных и индикаторов.\n\nЖёсткие правила и формат ответа:\n1) Возвращай СТРОГО один JSON-объект без комментариев и поясняющего текста.\n2) JSON-схема:\n{\n  \"decision\": \"long\" | \"short\" | \"none\",\n  \"entry\": number | null,                // предполагаемая точка входа (ближайшая к текущей цене) или null\n  \"targets\": number[],                   // массив из 2–4 тейк-профитов по возрастанию\n  \"stop\": number | null,                 // стоп-лосс или null\n  \"confidence\": number,                  // 0..100 — уверенность в решении\n  \"rationale\": string,                   // краткое обоснование (<= 200 символов, без markdown)\n  \"basis\": string[]                      // какие признаки повлияли (ключи: \"ema50>ema200\",\"ema50<ema200\",\"ema200_slope_up\",\n                                         // \"ema200_slope_down\",\"adx_strong\",\"rsi_overbought\",\"rsi_oversold\",\"macd_cross_up\",\n                                         // \"macd_cross_down\",\"stoch_up\",\"stoch_down\",\"vol_increase\",\"range_mode\",\"trend_mode\" и т.п.)\n}\n\nПравила принятия решения:\n- Если конвергенции мало (ADX низкий и/или ширина Боллинджера узкая, нет явных пересечений MACD/Стохастика) → \"decision\":\"none\".\n- Если \"decision\" не \"none\", \"confidence\" обычно ≥ 60. Сильная конвергенция (тренд + импульс + объём) → 70–85+.\n- В режиме диапазона (range) допускай сигнал только при явной разворотной картине (перекупленность/перепроданность + подтверждения).\n- В трендовом режиме (trend) отдавай предпочтение направленным сделкам по тренду.\n- Стоп-лосс от текущей цены с опорой на ATR14 (типично 1.0–1.8 * ATR): для long — ниже, для short — выше; цели по R-множителям (0.5R / 1R / 1.5R / 2R) либо по ближайшим уровням.\n- Не выдумывай неизвестные уровни: ориентируйся на переданные цены и индикаторы.\n- Если данных недостаточно для осмысленного решения, возвращай \"none\".\n\nСтиль минималистичный, только числа и краткие метки. Никаких лишних полей помимо указанных в схеме.\n`;\n\n// 5) Пользовательское сообщение с данными\nconst userPayload = {\n  meta: {\n    symbol: symbol || null,\n    timeframe: tf || null,\n  },\n  data: {\n    // текущие признаки\n    features: f,\n    // небольшая выборка последних свечей [t, o, h, l, c]\n    sample: sampleCompact\n  }\n};\n\n// 6) Формируем массив сообщений для OpenAI node\nconst prompt = [\n  { role: 'system', content: systemMessage.trim() },\n  { role: 'user',   content: JSON.stringify(userPayload) }\n];\n\n// 7) Возвращаем\nreturn [{\n  json: {\n    prompt,\n    // пробрасываем для следующих нод (Format Reply / Telegram)\n    symbol,\n    tf,\n    granularity\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        -208
+      ],
+      "id": "6df7b022-c756-4acd-8ff2-b53adc9df1cd",
+      "name": "Build LLM Prompt"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list",
+          "cachedResultName": "GPT-4O"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ JSON.stringify($json.prompt) }}\n"
+            }
+          ]
+        },
+        "options": {
+          "maxTokens": 300,
+          "temperature": 0.2,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        1552,
+        -208
+      ],
+      "id": "d02083d9-a551-4154-9f69-0b81ce51c00f",
+      "name": "Message a model",
+      "credentials": {
+        "openAiApi": {
+          "id": "RVKZBhIZSo5FxkcD",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse LLM JSON — вытаскиваем ответ модели, парсим, валидируем.\n// ВАЖНО: если твоя нода с промптом называется не \"Build LLM Prompt\",\n// замени имя в строке ниже.\nconst fromPrompt = ($items('Build LLM Prompt', 0, 0) || {}).json || {};\nconst fallbackChatId = fromPrompt.chatId ?? null;\nconst fallbackSymbol = fromPrompt.symbol ?? 'UNKNOWN';\nconst fallbackTf     = fromPrompt.tf     ?? 'UNKNOWN';\n\n// 1) Достаём сырой текст из OpenAI-ноды (учитываем разные версии схемы)\nfunction pickRaw(llmJson) {\n  if (!llmJson) return null;\n\n  // Старая схема (Chat Completions)\n  let raw = llmJson?.choices?.[0]?.message?.content;\n  if (raw) return raw;\n\n  // Новая схема (OpenAI Actions v2 → \"Message a model\", Simplify Output=ON)\n  // Пробуем несколько вариантов:\n  raw = llmJson?.response?.[0]?.content?.[0]?.text;\n  if (raw) return raw;\n\n  raw = llmJson?.data;         // иногда кладут строку сюда\n  if (raw) return raw;\n\n  raw = llmJson?.content;      // или сюда\n  if (raw) return raw;\n\n  raw = llmJson?.text;         // или прямо text\n  if (raw) return raw;\n\n  // Последний шанс — попробуем stringify всего объекта\n  try { return JSON.stringify(llmJson); } catch {}\n  return null;\n}\n\nconst rawIn = pickRaw($json) ?? '';\nlet cleaned = String(rawIn).trim();\n\n// 2) Убираем возможные code fences ```json ... ```\ncleaned = cleaned.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\n\n// 3) Парсим JSON\nlet obj = null, parseError = null;\ntry {\n  obj = JSON.parse(cleaned);\n} catch (e) {\n  parseError = String(e?.message || e);\n  obj = {};\n}\n\n// 4) Валидация и дефолты\nconst allowedSides = new Set(['long', 'short', 'wait']);\n\nfunction clampInt(n, a, b) {\n  const x = Number(n);\n  if (!Number.isFinite(x)) return a;\n  return Math.max(a, Math.min(b, Math.round(x)));\n}\n\nconst side       = allowedSides.has(obj.side) ? obj.side : 'wait';\nconst confidence = clampInt(obj.confidence, 0, 100);\nconst rationale  = (obj.rationale != null ? String(obj.rationale) : '');\nconst basisRaw   = Array.isArray(obj.basis) ? obj.basis : [];\nconst basis      = basisRaw.map(x => String(x)).slice(0, 8);\n\nconst symbol = obj.symbol ? String(obj.symbol) : fallbackSymbol;\nconst tf     = obj.timeframe ? String(obj.timeframe) : fallbackTf;\n\n// 5) Сформируем единый, аккуратный выход\nconst out = {\n  chatId: fallbackChatId,\n  symbol,\n  timeframe: tf,\n  side,\n  confidence,\n  rationale,\n  basis,\n  _raw: cleaned,\n  _parseError: parseError || null\n};\n\nreturn [{ json: out }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        -208
+      ],
+      "id": "eb393d8b-41ea-4686-91ae-dfea73e3872c",
+      "name": "Parse LLM JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------- Helpers ----------\nfunction pick(...vals) {\n  for (const v of vals) {\n    if (v !== undefined && v !== null && v !== '') return v;\n  }\n  return undefined;\n}\n\nfunction escapeHtml(s) {\n  if (s == null) return '';\n  return String(s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g,  '&lt;')\n    .replace(/>/g,  '&gt;');\n}\n\nfunction nf(x, d = 5) {\n  if (x == null || Number.isNaN(Number(x))) return '—';\n  return Number(x).toFixed(d).replace(/\\.?0+$/, ''); // обрезаем хвосты нулей\n}\n\nfunction pct(x) {\n  if (x == null) return '—';\n  const n = Math.max(0, Math.min(100, Number(x)));\n  return `${Math.round(n)}%`;\n}\n\nfunction normalizeTf(tf) {\n  if (!tf) return 'UNKNOWN';\n  let t = String(tf).toLowerCase().trim();\n  // частые варианты от апишек\n  t = t.replace(/^1hour$/, '1h')\n       .replace(/^1week$/, '1w')\n       .replace(/^1min$/, '1m')\n       .replace(/week$/, 'w')\n       .replace(/hour$/, 'h')\n       .replace(/minute$/, 'm')\n       .replace(/min$/, 'm');\n  return t;\n}\n\n// ---------- 1) Достаём модельный ответ ----------\nconst side       = String(($json.side || 'wait')).toLowerCase();     // long | short | wait\nconst confidence = Number($json.confidence ?? 0);\nconst rationale  = String($json.rationale ?? '');\nconst basis      = Array.isArray($json.basis) ? $json.basis : [];\n\nconst entry       = $json.entry ?? null;               // число / null\nconst takeProfits = Array.isArray($json.take_profits) ? $json.take_profits : [];\nconst stopLoss    = $json.stop_loss ?? null;\n\n// ---------- 2) Дотягиваем служебные поля из предыдущих нод ----------\n// Подгони ИМЕНА под твои, если отличаются в схеме\nconst jIf2  = ($items('if2', 0, 0)                    || {}).json || {};\nconst jCode = ($items('Code', 0, 0)                   || {}).json || {};\nconst jAgg  = ($items('Aggregate & Indicators', 0, 0) || {}).json || {};\nconst jTrig = ($items('Telegram Trigger', 0, 0)       || {}).json || {};\n\nlet symbol = pick($json.symbol, jIf2.symbol, jCode.symbol, jAgg.symbol);\nlet tf     = pick($json.timeframe, $json.tf, jIf2.tf, jCode.tf, jAgg.tf, jIf2.granularity, jCode.granularity);\nlet chatId = pick($json.chatId, jIf2.chatId, jCode.chatId, jTrig.message?.chat?.id);\n\nsymbol = symbol || 'UNKNOWN';\ntf     = normalizeTf(tf) || 'UNKNOWN';\n\n// ---------- 3) Собираем текст для Telegram (HTML) ----------\nconst badgeWait  = '⚠️';\nconst badgeLong  = '🟢';\nconst badgeShort = '🔴';\n\nconst hSymbol = escapeHtml(symbol);\nconst hTf     = escapeHtml(tf);\nconst hRat    = escapeHtml(rationale);\nconst hBasis  = basis.length ? escapeHtml(basis.join(', ')) : '—';\n\nfunction blockLevels() {\n  const lines = [];\n  if (entry != null)        lines.push(`• <b>Вход:</b> ${nf(entry)}`);\n  if (takeProfits.length)   lines.push(`• <b>Тейки:</b> ${takeProfits.map(x => nf(x)).join(' → ')}`);\n  if (stopLoss != null)     lines.push(`• <b>Стоп:</b> ${nf(stopLoss)}`);\n  return lines.join('\\n');\n}\n\nlet title = '';\nlet body  = '';\nlet footer = `\\n\\n<i>This message was sent automatically with n8n</i>`;\n\nif (side === 'long' || side === 'short') {\n  const badge = side === 'long' ? badgeLong : badgeShort;\n  const sideRu = side === 'long' ? 'ЛОНГ' : 'ШОРТ';\n\n  title = `${badge} <b>Сигнал: ${sideRu}</b>`;\n  body  = [\n    `<b>Монета:</b> ${hSymbol}`,\n    `<b>Таймфрейм:</b> ${hTf}`,\n    '',\n    blockLevels(),\n    '',\n    `<b>Уверенность:</b> ${pct(confidence)}`,\n    `<b>Причина:</b> ${hRat}`,\n    `<b>Признаки:</b> ${hBasis}`,\n  ].join('\\n');\n\n} else {\n  // wait / no signal\n  title = `${badgeWait} <b>Сигнал не сформирован</b>`;\n  body  = [\n    `<b>Монета:</b> ${hSymbol}`,\n    `<b>Таймфрейм:</b> ${hTf}`,\n    '',\n    `<b>Причина:</b> ${hRat || 'Недостаточно конвергентных признаков.'}`,\n    `<b>Уверенность:</b> ${pct(confidence)}`,\n    '',\n    `Подождём более чёткой конфигурации рынка.`,\n  ].join('\\n');\n}\n\nconst text = `${title}\\n\\n${body}${footer}`;\n\n// ---------- 4) Отдаём всё дальше ----------\nreturn [\n  {\n    json: {\n      // для отправки сообщения\n      chatId,\n      text,               // HTML-текст в Telegram \"Send a text message\" (Parse Mode = HTML)\n\n      // сервис для логики дальше\n      symbol,\n      tf,\n      side,\n      confidence,\n      entry,\n      take_profits: takeProfits,\n      stop_loss: stopLoss,\n    },\n  },\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2112,
+        -208
+      ],
+      "id": "538738af-d59f-4984-ab60-d51ba1ca110c",
+      "name": "Format Reply"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{$json.text}}",
+        "additionalFields": {
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2320,
+        -208
+      ],
+      "id": "49d8ac03-0695-4db9-8334-426a2d8c44aa",
+      "name": "Send a text message",
+      "webhookId": "4809bca9-a739-4260-9dfa-ec9e9d2cfad6",
+      "credentials": {
+        "telegramApi": {
+          "id": "DOYAH0PcyOnZtmHe",
+          "name": "Telegram account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Bitget Candles",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "не верный запрос",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bitget Candles": {
+      "main": [
+        [
+          {
+            "node": "Aggregate & Indicators",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "если монеты нет",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate & Indicators": {
+      "main": [
+        [
+          {
+            "node": "if2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "if2": {
+      "main": [
+        [
+          {
+            "node": "Build LLM Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "нет истории на монете",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build LLM Prompt": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM JSON": {
+      "main": [
+        [
+          {
+            "node": "Format Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Reply": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "64d2e802-5ef8-4013-b1fe-8881680ff766",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c65ba4e5d3228fa4d8a07fb4174629e080dd2f0cb93a504b18dd23a45c8bd399"
+  },
+  "id": "YZ3HE0uQBQH2insZ",
+  "tags": []
+}
